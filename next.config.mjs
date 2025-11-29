@@ -1,9 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // TEMPORARY: ignore ESLint during Next.js build on Vercel
+  // This unblocks the deployment immediately — remove later after fixing ESLint configs.
   eslint: {
-    // TEMPORARY: ignore ESLint during Next.js build on Vercel
     ignoreDuringBuilds: true,
   },
+
   images: {
     remotePatterns: [
       {
