@@ -5,117 +5,76 @@ import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { generateAIInsights } from "./dashboard";
 
-/**
- * Safely update user profile.
- * Returns an object { ok: boolean, data?, error? } instead of throwing raw errors.
- */
 export async function updateUser(data) {
+  // DEBUG LOG — this will tell us the real problem in Vercel logs
   try {
-    // Clerk auth() is synchronous on the server
-    const { userId } = auth();
+    const debugAuth = auth();
+    console.log("DEBUG AUTH RESULT:", debugAuth);
+  } catch (e) {
+    console.error("DEBUG AUTH THREW:", e);
+  }
+
+  try {
+    const { userId } = auth(); // Clerk auth() is NOT async
     if (!userId) {
-      console.error("updateUser: missing userId from auth()");
+      console.error("updateUser: Missing userId");
       return { ok: false, error: "UNAUTHORIZED" };
     }
 
-    // Find local user record by clerkUserId
+    // Find user by clerkUserId
     const user = await db.user.findUnique({
       where: { clerkUserId: userId },
     });
 
     if (!user) {
-      console.error("updateUser: user not found for clerkUserId:", userId);
+      console.error("updateUser: User not found for clerkUserId:", userId);
       return { ok: false, error: "USER_NOT_FOUND" };
     }
 
-    // Ensure industryInsight exists BEFORE the transaction.
-    // generateAIInsights may call external APIs — do that outside tx to avoid long transactions.
-    let industryInsight = await db.industryInsight.findUnique({
+    // Ensure industry insight exists BEFORE transaction
+    let insight = await db.industryInsight.findUnique({
       where: { industry: data.industry },
     });
 
-    if (!industryInsight) {
+    if (!insight) {
       try {
-        const insights = await generateAIInsights(data.industry);
-        industryInsight = await db.industryInsight.create({
+        const ai = await generateAIInsights(data.industry);
+        insight = await db.industryInsight.create({
           data: {
             industry: data.industry,
-            ...insights,
-            nextUpdate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            ...ai,
+            nextUpdate: new Date(Date.now() + 7 * 24 * 3600 * 1000),
           },
         });
       } catch (err) {
-        // If AI generation fails, log and continue — we still allow profile update
-        console.error("updateUser: generateAIInsights/create failed:", err);
+        console.error("generateAIInsights failed:", err);
       }
     }
 
-    // Perform the user update inside a transaction (only user update here)
-    const result = await db.$transaction(
-      async (tx) => {
-        const updatedUser = await tx.user.update({
-          where: { id: user.id },
-          data: {
-            industry: data.industry,
-            experience: data.experience,
-            bio: data.bio,
-            skills: data.skills,
-          },
-        });
+    // Only update user inside tx
+    const result = await db.$transaction(async (tx) => {
+      const updatedUser = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          industry: data.industry,
+          experience: data.experience,
+          bio: data.bio,
+          skills: data.skills,
+        },
+      });
 
-        return { updatedUser };
-      },
-      { timeout: 10000 }
-    );
+      return updatedUser; // <-- IMPORTANT FIX
+    });
 
-    // Revalidate the home page cache
-    try {
-      revalidatePath("/");
-    } catch (err) {
-      // Non-fatal: log but don't fail the update
-      console.warn("updateUser: revalidatePath error:", err);
-    }
-
-    // Return the updated user
-    return { ok: true, data: result.updatedUser };
+    revalidatePath("/");
+    return { ok: true, data: result };
   } catch (error) {
-    // Log full error to Vercel with context so you can inspect stack trace
-    console.error("updateUser: FAILED", {
+    console.error("updateUser FAILED:", {
       message: error?.message,
-      name: error?.name,
       code: error?.code,
       stack: error?.stack,
-      inputKeys: Object.keys(data || {}),
+      dataKeys: Object.keys(data || {}),
     });
-    // Return controlled error object
-    return { ok: false, error: error?.message ?? "FAILED_TO_UPDATE_PROFILE" };
-  }
-}
-
-export async function getUserOnboardingStatus() {
-  try {
-    const { userId } = auth();
-    if (!userId) {
-      console.error("getUserOnboardingStatus: missing userId");
-      return { isOnboarded: false, ok: false, error: "UNAUTHORIZED" };
-    }
-
-    const user = await db.user.findUnique({
-      where: { clerkUserId: userId },
-      select: { industry: true },
-    });
-
-    if (!user) {
-      // user not found — not onboarded
-      return { isOnboarded: false, ok: false, error: "USER_NOT_FOUND" };
-    }
-
-    return { isOnboarded: !!user.industry, ok: true };
-  } catch (error) {
-    console.error("getUserOnboardingStatus: ERROR", {
-      message: error?.message,
-      stack: error?.stack,
-    });
-    return { isOnboarded: false, ok: false, error: "FAILED_TO_CHECK_ONBOARDING" };
+    return { ok: false, error: "UPDATE_FAILED" };
   }
 }
